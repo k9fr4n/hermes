@@ -1,0 +1,10 @@
+# Secrets et configuration locale
+.env
+
+# Donnees persistantes du conteneur (/opt/data : config, .env, sessions,
+# skills, memoires, logs — contient des secrets).
+# Le dossier est versionne (via .gitkeep) pour qu'un clone soit directement
+# utilisable : Docker creerait sinon le dossier en root:root.
+data/**/*
+!data/**/
+!data/**/.gitkeep

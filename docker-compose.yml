@@ -1,0 +1,88 @@
+# Deploiement Hermes Agent pour Raspberry Pi (arm64).
+# Frontal HTTPS : Traefik (/home/kfr/docker/traefic, reseau externe "proxy").
+# Acces :
+#   https://hermes-dashboard.ecritel.net (Traefik:443 -> 9119, dashboard)
+#   https://hermes-webapp.ecritel.net    (Traefik:443 -> 9120, webapp)
+#   + LAN http://<pi>:9119 (dashboard) et http://<pi>:9120 (webapp).
+#
+# Image officielle upstream (amd64+arm64, pas de build) :
+#   nousresearch/hermes-agent:latest
+# Le Pi ne construit rien : il telecharge l'image et la lance avec Compose.
+# Doc upstream : https://hermes-agent.nousresearch.com/docs/user-guide/docker
+
+services:
+  hermes:
+    image: ${HERMES_IMAGE:-nousresearch/hermes-agent:latest}
+    container_name: hermes
+    # `gateway run` est supervise par s6 dans l'image officielle ; le dashboard
+    # tourne comme service supervise parallele quand HERMES_DASHBOARD=1.
+    # Ne PAS surcharger entrypoint: (sans /init, les process orphelins ne sont
+    # jamais recoltes et la supervision s6 disparait).
+    command: gateway run
+    ports:
+      - "${HERMES_GATEWAY_PORT:-8642}:8642"
+      - "${HERMES_DASHBOARD_PORT:-9119}:9119"
+      - "${HERMES_WEBAPP_PORT:-9120}:9120"
+    expose:
+      - "8642"
+      - "9119"
+      - "9120"
+    networks:
+      - default
+      - proxy
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=proxy"
+      # Dashboard (port 9119).
+      - "traefik.http.routers.hermes-dashboard.rule=Host(`${HERMES_DASHBOARD_HOSTNAME:-hermes-dashboard.ecritel.net}`)"
+      - "traefik.http.routers.hermes-dashboard.entrypoints=websecure"
+      - "traefik.http.routers.hermes-dashboard.tls=true"
+      - "traefik.http.routers.hermes-dashboard.service=hermes-dashboard"
+      - "traefik.http.services.hermes-dashboard.loadbalancer.server.port=9119"
+      # Webapp (port 9120, active via webapp.enabled dans config.yaml).
+      - "traefik.http.routers.hermes-webapp.rule=Host(`${HERMES_WEBAPP_HOSTNAME:-hermes-webapp.ecritel.net}`)"
+      - "traefik.http.routers.hermes-webapp.entrypoints=websecure"
+      - "traefik.http.routers.hermes-webapp.tls=true"
+      - "traefik.http.routers.hermes-webapp.service=hermes-webapp"
+      - "traefik.http.services.hermes-webapp.loadbalancer.server.port=9120"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      # L'image stocke TOUT l'etat sous /opt/data (config, .env, sessions,
+      # skills, memoires, logs). Un seul volume suffit : l'image est sans etat
+      # et la mise a jour consiste a tirer la nouvelle image.
+      - ./data:/opt/data
+    environment:
+      # Dashboard supervise par s6 aux cotes du gateway.
+      HERMES_DASHBOARD: "1"
+      # Ecoute 0.0.0.0 DANS le conteneur pour que le port publie et Traefik
+      # puissent joindre le dashboard. Le bind non-loopback engage l'auth gate :
+      # les 3 variables ci-dessous sont donc obligatoires (fail-closed sinon).
+      HERMES_DASHBOARD_HOST: 0.0.0.0
+      HERMES_DASHBOARD_PORT: "9119"
+      HERMES_DASHBOARD_BASIC_AUTH_USERNAME: ${HERMES_DASHBOARD_USERNAME:?Definir HERMES_DASHBOARD_USERNAME dans .env}
+      HERMES_DASHBOARD_BASIC_AUTH_PASSWORD: ${HERMES_DASHBOARD_PASSWORD:?Definir HERMES_DASHBOARD_PASSWORD dans .env}
+      HERMES_DASHBOARD_BASIC_AUTH_SECRET: ${HERMES_DASHBOARD_SECRET:?Definir HERMES_DASHBOARD_SECRET dans .env}
+      # UID/GID du proprietaire des fichiers sur le Pi (defaut : 1000:1000).
+      # L'entrypoint corrige la propriete du volume au premier demarrage.
+      HERMES_UID: ${HERMES_UID:-1000}
+      HERMES_GID: ${HERMES_GID:-1000}
+      # Cles API : de preference via le dashboard (page API Keys) ou
+      # `docker compose exec hermes hermes config set ...` — elles sont
+      # stockees dans data/.env, jamais commitees. Decommenter pour injecter
+      # depuis .env de l'hote (surcharge les valeurs de data/.env) :
+      # ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      # OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    healthcheck:
+      # /api/status est un endpoint public : utilisable comme sonde.
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:9119/api/status', timeout=5)\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+    restart: unless-stopped
+
+networks:
+  proxy:
+    name: proxy
+    external: true
